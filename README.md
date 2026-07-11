@@ -30,4 +30,4 @@ A Tampermonkey userscript that reshapes the YouTube player for distraction-free,
 
 ## License
 
-MIT (add a LICENSE file if you want it explicit).
+MIT-NC
