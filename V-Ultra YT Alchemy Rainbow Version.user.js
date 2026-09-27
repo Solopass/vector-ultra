@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         V-Ultra Theatre Mode
 // @namespace    http://tampermonkey.net/
-// @version      7.2
-// @description  Frame-Zero Native Max Quality Engine (4K/2K/1080p Enhanced), Rainbow Quality Indicator, Smart Fit, Shorts Focus, and Zero-Copy Hardware Acceleration.
+// @version      7.3
+// @description  Frame-Zero Native Max Quality Engine (4K/2K/1080p Enhanced), Rainbow Quality Indicator, Theater Scroll Alignment Engine, Smart Fit, Shorts Focus, and Zero-Copy Hardware Acceleration.
 // @author       Solopass (Refactored)
 // @match        *://*.youtube.com/*
 // @grant        GM_setValue
@@ -99,6 +99,10 @@
         let scriptInitTime = Date.now();
         let isPlayingState = false;
         let qualityAttemptedForVideo = '';
+        let userBrowsingMode = false;
+        let lastScrollInteraction = 0;
+        let snapDebounceTimer = null;
+        let theaterObserved = false;
 
         let db = GM_getValue('vectorSmartVideoDB', {
             presets: { "Default Reset": { zoom: 1, x: 0, y: 0, bright: 100, cont: 100, sat: 100, sharpen: 0, shortsZoom: 1.25 } },
@@ -128,6 +132,15 @@
                 height: 100vh !important;
                 max-height: 100vh !important;
                 min-height: 100vh !important;
+            }
+
+            /* Ensure Watch Flexy and Theater Containers anchor flush to top */
+            ytd-watch-flexy[theater],
+            ytd-watch-flexy[theater] #full-bleed-container,
+            ytd-watch-flexy[theater] #player-full-bleed-container {
+                scroll-margin-top: 0px !important;
+                margin-top: 0px !important;
+                padding-top: 0px !important;
             }
 
             /* Ghost UI Auto-hide */
@@ -620,6 +633,92 @@
             }
         }
 
+        // =========================================================================
+        // PHASE 3: THEATER MODE SCROLL ALIGNMENT & USER INTENT GUARD
+        // =========================================================================
+
+        const markUserScroll = () => {
+            lastScrollInteraction = Date.now();
+            const y = window.scrollY || document.documentElement?.scrollTop || 0;
+            if (y >= 140) {
+                userBrowsingMode = true;
+            } else if (y <= 30) {
+                userBrowsingMode = false;
+            }
+        };
+
+        window.addEventListener('wheel', markUserScroll, { passive: true });
+        window.addEventListener('touchmove', markUserScroll, { passive: true });
+        window.addEventListener('keydown', (e) => {
+            if (['ArrowDown', 'ArrowUp', 'PageDown', 'PageUp', 'Space', 'Home', 'End'].includes(e.code)) {
+                markUserScroll();
+            }
+        }, { passive: true });
+
+        function snapToTop(force = false) {
+            const isWatch = window.location.pathname.includes('/watch');
+            if (!isWatch) return;
+
+            const isTheater = document.querySelector('ytd-watch-flexy[theater]');
+            if (!isTheater) return;
+
+            const currentY = window.scrollY || document.documentElement?.scrollTop || 0;
+
+            // USER INTENT GUARD: If user is reading comments or browsing, NEVER pull them up!
+            if (!force && (userBrowsingMode || currentY >= 140)) {
+                return;
+            }
+
+            try {
+                window.scrollTo({ top: 0, left: 0, behavior: 'instant' });
+                if (document.documentElement) document.documentElement.scrollTop = 0;
+                if (document.body) document.body.scrollTop = 0;
+            } catch (_) {}
+        }
+
+        window.addEventListener('scroll', () => {
+            const y = window.scrollY || document.documentElement?.scrollTop || 0;
+            if (y >= 140) {
+                userBrowsingMode = true;
+                return;
+            }
+
+            const isTheater = document.querySelector('ytd-watch-flexy[theater]');
+            if (!isTheater) return;
+
+            // Micro-drift correction: only in the 1px - 80px deadzone when user is idle
+            if (y > 0 && y <= 80) {
+                if (snapDebounceTimer) clearTimeout(snapDebounceTimer);
+                snapDebounceTimer = setTimeout(() => {
+                    const nowY = window.scrollY || document.documentElement?.scrollTop || 0;
+                    const idleTime = Date.now() - lastScrollInteraction;
+                    if (nowY > 0 && nowY <= 80 && idleTime >= 700) {
+                        window.scrollTo({ top: 0, left: 0, behavior: 'smooth' });
+                        userBrowsingMode = false;
+                    }
+                }, 350);
+            } else if (y === 0) {
+                userBrowsingMode = false;
+            }
+        }, { passive: true });
+
+        const setupTheaterObserver = () => {
+            const watchFlexy = document.querySelector('ytd-watch-flexy');
+            if (watchFlexy && !theaterObserved) {
+                theaterObserved = true;
+                const theaterObs = new MutationObserver((mutations) => {
+                    for (const m of mutations) {
+                        if (m.type === 'attributes' && m.attributeName === 'theater') {
+                            if (watchFlexy.hasAttribute('theater') && !userBrowsingMode) {
+                                snapToTop(true);
+                            }
+                        }
+                    }
+                });
+                theaterObs.observe(watchFlexy, { attributes: true, attributeFilter: ['theater'] });
+            }
+        };
+
         const btn = createEl('button', { id: 'vector-btn', textContent: 'V-ULTRA', className: 'vector-ui-element' });
         const hud = createEl('div', { id: 'zoom-hud' });
         const panel = createEl('div', { id: 'vector-panel', className: 'vector-ui-element' });
@@ -803,12 +902,20 @@
             if (v && v.src !== lastVideoSrc) {
                 lastVideoSrc = v.src;
                 video = v;
+                userBrowsingMode = false;
+                snapToTop(true);
                 v.addEventListener('loadedmetadata', () => {
                     scheduleSmartFit();
                     applyInitialPlayerQuality();
+                    snapToTop(true);
                     setTimeout(enforceHighestQualityViaMenu, 350);
                     setTimeout(updateMaxQualityIndicator, 600);
                 }, { once: true });
+                v.addEventListener('playing', () => {
+                    if (!userBrowsingMode && (window.scrollY || document.documentElement?.scrollTop || 0) < 80) {
+                        snapToTop(false);
+                    }
+                });
                 if (p) resObs.observe(p);
 
                 if (!lockSettings) {
@@ -835,6 +942,8 @@
 
         window.addEventListener('yt-navigate-start', () => {
             qualityAttemptedForVideo = '';
+            userBrowsingMode = false;
+            snapToTop(true);
             const btnEl = document.getElementById('vector-btn');
             const panelEl = document.getElementById('vector-panel');
             btnEl?.classList.remove('vultra-max-quality');
@@ -842,12 +951,17 @@
         });
 
         window.addEventListener('yt-navigate-finish', () => {
+            userBrowsingMode = false;
             preSeedStoredQuality();
+            snapToTop(true);
+            setTimeout(() => snapToTop(true), 150);
+            setTimeout(() => snapToTop(true), 400);
             setTimeout(handleVideoChange, 100);
         });
 
         setInterval(() => {
             setupUI();
+            setupTheaterObserver();
             handleVideoChange();
             updateMaxQualityIndicator();
 
@@ -863,6 +977,9 @@
                 isPlayingState = shouldPlay;
                 if (shouldPlay) {
                     document.body.setAttribute('vector-playing', 'true');
+                    if (!userBrowsingMode && (window.scrollY || document.documentElement?.scrollTop || 0) < 80) {
+                        snapToTop(false);
+                    }
                 } else {
                     document.body.removeAttribute('vector-playing');
                     document.body.classList.remove('vector-hover');
