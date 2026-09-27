@@ -29,6 +29,8 @@ IGNORE THE REST JUST COPY PASTE THE RAINBOW FILE CONTENTS INTO A NEW SCRIPT IN T
 - `@match *://*.youtube.com/*`, runs at `document-start`.
 - Uses `GM_setValue`/`GM_getValue` for persistence, `GM_addStyle`, and `GM_setClipboard`.
 - Always follow good security practices when installing userscripts — read the source before you run it.
+- The rainbow border on the V-Ultra button indicates that the video is playing on the highest possible quality.
+- Bugs I care about, sometimes it will scroll badly. Non issue really; also sometimes it will scroll badly in a way the bottom of the player is shown, which is bad and I do care about. Mostly good. Just don't scroll for a few seconds and let it magically settle down when the page loads for the first time.
 
 ## License
 
