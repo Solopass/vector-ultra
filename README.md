@@ -32,7 +32,8 @@ Check notes section and install section if you're confused on what to do next.
 - Uses `GM_setValue`/`GM_getValue` for persistence, `GM_addStyle`, and `GM_setClipboard`.
 - Always follow good security practices when installing userscripts — read the source before you run it.
 - The rainbow border on the V-Ultra button indicates that the video is playing on the highest possible quality.
-- Bugs I care about, sometimes it will scroll badly. Non issue really; also sometimes it will scroll badly in a way the bottom of the player is shown, which is bad and I do care about. Mostly good. Just don't scroll for a few seconds and let it magically settle down when the page loads for the first time.
+- Bugs I care about, sometimes it will scroll badly. I think I just fixed this mostly, just don't touch anything wait for a few seconds when a new video is loaded, or else it may stall the scrolling fix and then you have to MANUALL SCROLL THE VIDEO BACK TO THE TOP AHHHHHHH THE HUMANITY!!!!
+- Fixed all the other bugs I could find but please report any other issues. I'd expect compatibility issues with other YouTube scripts and stuff.
 
 ## License
 
