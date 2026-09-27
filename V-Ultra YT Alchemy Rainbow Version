@@ -1,0 +1,879 @@
+// ==UserScript==
+// @name         V-Ultra Theatre Mode
+// @namespace    http://tampermonkey.net/
+// @version      7.2
+// @description  Frame-Zero Native Max Quality Engine (4K/2K/1080p Enhanced), Rainbow Quality Indicator, Smart Fit, Shorts Focus, and Zero-Copy Hardware Acceleration.
+// @author       Solopass (Refactored)
+// @match        *://*.youtube.com/*
+// @grant        GM_setValue
+// @grant        GM_getValue
+// @grant        GM_addStyle
+// @grant        unsafeWindow
+// @run-at       document-start
+// ==/UserScript==
+
+(function () {
+    'use strict';
+
+    // =========================================================================
+    // PHASE 1: FRAME-ZERO MODERN STORAGE PRE-SEED & CONFIG HOOK (@run-at document-start)
+    // =========================================================================
+
+    const preSeedStoredQuality = () => {
+        try {
+            const now = Date.now();
+            const te = now + (365 * 24 * 60 * 60 * 1000); // 1 year
+            // Modern YouTube DASH player expects nested JSON object with pixel height
+            const payload = {
+                data: JSON.stringify({ quality: 4320, previousQuality: 4320 }),
+                expiration: te,
+                creation: now
+            };
+            localStorage.setItem('yt-player-quality', JSON.stringify(payload));
+            localStorage.setItem('yt-player-bandwidth', JSON.stringify({
+                data: 104857600, // 100 Mbps
+                expiration: te,
+                creation: now
+            }));
+        } catch (_) {}
+    };
+
+    preSeedStoredQuality();
+
+    // Hook Storage.prototype.getItem to guarantee YouTube always receives max credentials
+    try {
+        const origGetItem = Storage.prototype.getItem;
+        Storage.prototype.getItem = function (key) {
+            if (key === 'yt-player-quality') {
+                return JSON.stringify({
+                    data: JSON.stringify({ quality: 4320, previousQuality: 4320 }),
+                    expiration: Date.now() + (365 * 24 * 60 * 60 * 1000),
+                    creation: Date.now()
+                });
+            }
+            if (key === 'yt-player-bandwidth') {
+                return JSON.stringify({
+                    data: 104857600,
+                    expiration: Date.now() + (365 * 24 * 60 * 60 * 1000),
+                    creation: Date.now()
+                });
+            }
+            return origGetItem.apply(this, arguments);
+        };
+    } catch (_) {}
+
+    // Hook ytcfg / ytplayer config to lock native player to highres
+    const hookYtConfig = () => {
+        const pWindow = (typeof unsafeWindow !== 'undefined' && unsafeWindow) ? unsafeWindow : window;
+        if (pWindow.ytcfg && pWindow.ytcfg.set) {
+            try {
+                const currentFlags = (pWindow.ytcfg.get && pWindow.ytcfg.get('EXPERIMENT_FLAGS')) || {};
+                pWindow.ytcfg.set({
+                    'EXPERIMENT_FLAGS': {
+                        ...currentFlags,
+                        html5_default_quality: 'highres',
+                        html5_min_quality: 'highres'
+                    }
+                });
+            } catch (_) {}
+        }
+    };
+    hookYtConfig();
+
+    // =========================================================================
+    // PHASE 2: UI, THEATRE MODE, SMART FIT & ZERO-COPY MPO ACCELERATION
+    // =========================================================================
+
+    function initVUltraUI() {
+        if (window.__VECTOR_ULTRA_UI_LOADED__) return;
+        window.__VECTOR_ULTRA_UI_LOADED__ = true;
+
+        let video = null;
+        let lastVideoSrc = null;
+        let settings = { zoom: 1, x: 0, y: 0, bright: 100, cont: 100, sat: 100, sharpen: 0, shortsZoom: 1.25 };
+        let lockSettings = GM_getValue('vector_lockState', false);
+        let smartFitActive = GM_getValue('vector_smartFitState', true);
+        let zoomTimer = null;
+        let fitDebounceTimer = null;
+        let uiIdleTimer = null;
+        let scriptInitTime = Date.now();
+        let isPlayingState = false;
+        let qualityAttemptedForVideo = '';
+
+        let db = GM_getValue('vectorSmartVideoDB', {
+            presets: { "Default Reset": { zoom: 1, x: 0, y: 0, bright: 100, cont: 100, sat: 100, sharpen: 0, shortsZoom: 1.25 } },
+            channels: {}
+        });
+        const saveDB = () => GM_setValue('vectorSmartVideoDB', db);
+
+        GM_addStyle(`
+            :root {
+                --vz: 1;
+                --vx: 0px;
+                --vy: 0px;
+                --ytd-masthead-height: 0px !important;
+                --ytd-toolbar-height: 0px !important;
+            }
+
+            ytd-app,
+            ytd-page-manager,
+            #page-manager {
+                margin-top: 0 !important;
+                padding-top: 0 !important;
+            }
+
+            /* Force Theater Mode to be 100vh so the video fills the entire screen ONLY in theater mode */
+            ytd-watch-flexy[theater] #full-bleed-container.ytd-watch-flexy,
+            ytd-watch-flexy[theater] #player-full-bleed-container.ytd-watch-flexy {
+                height: 100vh !important;
+                max-height: 100vh !important;
+                min-height: 100vh !important;
+            }
+
+            /* Ghost UI Auto-hide */
+            #masthead-container {
+                position: fixed !important;
+                top: 0 !important;
+                width: 100% !important;
+                z-index: 2147483645 !important;
+                transition: opacity 0.25s ease, transform 0.25s ease !important;
+                background: transparent !important;
+            }
+
+            body[vector-playing="true"]:not(.vector-hover) #masthead-container {
+                opacity: 0 !important;
+                pointer-events: none !important;
+                transform: translateY(-100%) !important;
+                background: transparent !important;
+            }
+
+            body.vector-hover #masthead-container {
+                opacity: 1 !important;
+                pointer-events: auto !important;
+                transform: translateY(0) !important;
+                background: var(--yt-spec-base-background, #0f0f0f) !important;
+            }
+
+            /* Hardware Zero-Copy: No static filter or transition on video to preserve D3D11 MPO Overlay */
+            video.html5-main-video {
+                transform: scale(var(--vz, 1)) translate(var(--vx, 0px), var(--vy, 0px)) !important;
+                transform-origin: center center !important;
+            }
+
+            /* Stealth Settings Menu Hide during auto-quality selection */
+            html.vultra-hide-settings .ytp-settings-menu {
+                display: none !important;
+                opacity: 0 !important;
+                visibility: hidden !important;
+                pointer-events: none !important;
+            }
+
+            /* ANIMATED RAINBOW MAX QUALITY INDICATOR */
+            @keyframes vultra-rainbow {
+                0% {
+                    border-color: #ff0055;
+                    box-shadow: 0 0 12px rgba(255, 0, 85, 0.65);
+                }
+                16% {
+                    border-color: #ff9900;
+                    box-shadow: 0 0 12px rgba(255, 153, 0, 0.65);
+                }
+                33% {
+                    border-color: #ffea00;
+                    box-shadow: 0 0 12px rgba(255, 234, 0, 0.65);
+                }
+                50% {
+                    border-color: #00ff66;
+                    box-shadow: 0 0 12px rgba(0, 255, 102, 0.65);
+                }
+                66% {
+                    border-color: #00ccff;
+                    box-shadow: 0 0 12px rgba(0, 204, 255, 0.65);
+                }
+                83% {
+                    border-color: #cc00ff;
+                    box-shadow: 0 0 12px rgba(204, 0, 255, 0.65);
+                }
+                100% {
+                    border-color: #ff0055;
+                    box-shadow: 0 0 12px rgba(255, 0, 85, 0.65);
+                }
+            }
+
+            #vector-btn.vultra-max-quality {
+                border: 2px solid #ff0055 !important;
+                animation: vultra-rainbow 3s linear infinite !important;
+            }
+
+            #vector-panel.vultra-max-quality {
+                border: 2px solid #ff0055 !important;
+                animation: vultra-rainbow 3s linear infinite !important;
+            }
+
+            #vector-panel.vultra-max-quality .drag-handle {
+                border-bottom: 2px solid #ff0055 !important;
+                animation: vultra-rainbow 3s linear infinite !important;
+            }
+
+            /* VECTOR UI - Stealth Logic */
+            .vector-ui-element {
+                transition: opacity 0.4s ease-in-out !important;
+            }
+            .vector-ui-hidden {
+                opacity: 0 !important;
+                pointer-events: none !important;
+            }
+
+            #vector-btn {
+                position: fixed;
+                top: 80px;
+                right: 20px;
+                z-index: 2147483647;
+                padding: 10px 14px;
+                background: #111;
+                color: #fff;
+                border: 1px solid #444;
+                border-radius: 8px;
+                cursor: pointer;
+                font-weight: bold;
+                box-shadow: 0 4px 15px #000;
+                font-family: sans-serif;
+                letter-spacing: 1px;
+            }
+
+            #zoom-hud {
+                position: fixed;
+                top: 125px;
+                right: 20px;
+                z-index: 2147483647;
+                background: rgba(0,0,0,0.9);
+                color: #0f0;
+                padding: 6px 12px;
+                border: 1px solid #0f0;
+                border-radius: 4px;
+                font-family: monospace;
+                display: none;
+                pointer-events: none;
+            }
+
+            #vector-panel {
+                position: fixed;
+                top: 130px;
+                right: 20px;
+                z-index: 2147483646;
+                background: #111;
+                color: #fff;
+                padding: 15px;
+                border: 1px solid #444;
+                border-radius: 10px;
+                display: none;
+                width: 330px;
+                font-family: sans-serif;
+                max-height: 85vh;
+                overflow-y: auto;
+                box-shadow: 0 10px 40px #000;
+            }
+
+            .drag-handle {
+                cursor: grab;
+                background: #222;
+                margin: -15px -15px 15px -15px;
+                padding: 12px;
+                text-align: center;
+                font-weight: bold;
+                color: #00ff00;
+                font-size: 11px;
+                border-bottom: 1px solid #333;
+                letter-spacing: 2px;
+            }
+
+            .status-console {
+                background: #000;
+                color: #0f0;
+                font-family: monospace;
+                font-size: 10px;
+                padding: 10px;
+                border-radius: 4px;
+                margin-top: 10px;
+                border: 1px solid #222;
+                min-height: 14px;
+            }
+
+            .ui-row {
+                display: flex;
+                justify-content: space-between;
+                margin-bottom: 8px;
+                gap: 5px;
+            }
+
+            .ui-btn {
+                flex: 1;
+                padding: 8px;
+                background: #333;
+                color: #fff;
+                border: 1px solid #555;
+                border-radius: 5px;
+                cursor: pointer;
+                font-size: 10px;
+                font-weight: bold;
+            }
+
+            .ui-btn-blue { background: #065fd4 !important; border: none; }
+            .ui-btn-red  { background: #7b0000 !important; border: none; }
+
+            input[type=range] {
+                width: 100%;
+                accent-color: #0f0;
+                margin: 6px 0;
+                cursor: pointer;
+            }
+
+            select {
+                width: 100%;
+                padding: 6px;
+                background: #222;
+                color: #fff;
+                border: 1px solid #444;
+                margin-bottom: 8px;
+                border-radius: 4px;
+                font-size: 11px;
+            }
+
+            .label-text {
+                font-size: 10px;
+                color: #888;
+                text-transform: uppercase;
+                letter-spacing: 0.5px;
+                display: block;
+                margin-top: 5px;
+            }
+
+            .toggle-wrap {
+                display: flex;
+                align-items: center;
+                background: #1a1a1a;
+                padding: 8px;
+                border-radius: 6px;
+                margin-bottom: 6px;
+                border: 1px solid #333;
+            }
+
+            .toggle-wrap input {
+                margin-right: 12px;
+                transform: scale(1.2);
+            }
+
+            #vector-sensor {
+                position: fixed;
+                top: 0;
+                left: 0;
+                width: 100%;
+                height: 12px;
+                z-index: 2147483646;
+                background: transparent;
+            }
+        `);
+
+        const createEl = (tag, props = {}, style = {}) => {
+            const el = document.createElement(tag);
+            Object.assign(el, props);
+            Object.assign(el.style, style);
+            return el;
+        };
+
+        const logStatus = (msg) => {
+            const c = document.getElementById('vector-status');
+            if (c) c.textContent = `> ${msg.toUpperCase()}`;
+        };
+
+        const showHUD = (val, mode = "AUTO-FIT") => {
+            const h = document.getElementById('zoom-hud');
+            if (!h) return;
+            h.textContent = `${mode}: ${val}X`;
+            h.style.display = 'block';
+            if (zoomTimer) clearTimeout(zoomTimer);
+            zoomTimer = setTimeout(() => { h.style.display = 'none'; }, 3000);
+        };
+
+        const updateCSS = () => {
+            const r = document.documentElement.style;
+            r.setProperty('--vz', settings.zoom);
+            r.setProperty('--vx', settings.x + 'px');
+            r.setProperty('--vy', settings.y + 'px');
+
+            // ZERO-COPY MPO OVERLAY OPTIMIZATION:
+            const v = video || document.querySelector('video.html5-main-video');
+            if (v) {
+                if (settings.bright === 100 && settings.cont === 100 && settings.sat === 100) {
+                    if (v.style.filter && v.style.filter !== 'none') {
+                        v.style.filter = 'none';
+                    }
+                } else {
+                    const filterStr = `brightness(${settings.bright}%) contrast(${settings.cont}%) saturate(${settings.sat}%)`;
+                    if (v.style.filter !== filterStr) {
+                        v.style.filter = filterStr;
+                    }
+                }
+            }
+        };
+
+        const resetIdleTimer = () => {
+            const elements = [document.getElementById('vector-btn'), document.getElementById('vector-panel')];
+            elements.forEach(el => { if (el) el.classList.remove('vector-ui-hidden'); });
+            clearTimeout(uiIdleTimer);
+            uiIdleTimer = setTimeout(() => {
+                if (!document.getElementById('vector-panel')?.matches(':hover')) {
+                    elements.forEach(el => { if (el) el.classList.add('vector-ui-hidden'); });
+                }
+            }, 3000);
+        };
+
+        function performSmartFit() {
+            video = document.querySelector('video.html5-main-video');
+            const isShorts = window.location.pathname.includes('/shorts/');
+            if (isShorts) {
+                video = document.querySelector('ytd-shorts [is-active] video.html5-main-video') || video;
+            }
+            const player = document.querySelector('#movie_player');
+            if (!video || !player || !smartFitActive || video.videoWidth === 0 || video.videoHeight === 0) return;
+
+            const vR = video.videoWidth / video.videoHeight;
+            const pR = player.offsetWidth / player.offsetHeight;
+
+            if (vR < 0.8 || isShorts) {
+                settings.zoom = settings.shortsZoom;
+                settings.x = 0;
+                settings.y = 0;
+                showHUD(settings.zoom, "SHORTS-VECTOR");
+                logStatus("VECTOR: SHORTS MODE " + settings.zoom + "X");
+            } else {
+                let scale = (pR > vR) ? (pR / vR) : (vR / pR);
+                scale = parseFloat(scale.toFixed(2));
+                settings.zoom = scale;
+                settings.x = 0;
+                settings.y = 0;
+                showHUD(scale, "APEX-FIT");
+                logStatus("VECTOR: CINEMATIC " + scale + "X");
+            }
+            updateCSS();
+            syncSliders();
+        }
+
+        const scheduleSmartFit = () => {
+            if (!smartFitActive) return;
+            if (fitDebounceTimer) clearTimeout(fitDebounceTimer);
+            fitDebounceTimer = setTimeout(() => {
+                requestAnimationFrame(performSmartFit);
+            }, 150);
+        };
+
+        // =========================================================================
+        // RAINBOW MAX QUALITY VERIFICATION INDICATOR
+        // =========================================================================
+
+        function updateMaxQualityIndicator() {
+            const player = document.getElementById('movie_player');
+            const v = video || document.querySelector('video.html5-main-video');
+            const btnEl = document.getElementById('vector-btn');
+            const panelEl = document.getElementById('vector-panel');
+
+            if (!btnEl && !panelEl) return;
+
+            let isMax = false;
+
+            if (player && v && v.videoHeight > 0) {
+                const levels = typeof player.getAvailableQualityLevels === 'function' ? player.getAvailableQualityLevels() : [];
+                if (levels.length > 0) {
+                    const QUALITY_HEIGHT_LOOKUP = {
+                        'highres': 2161, 'hd2880': 2880, 'hd2160': 2000, 'hd1440': 1400,
+                        'hd1080': 1000, 'hd720': 700, 'large': 450, 'medium': 350, 'small': 220
+                    };
+                    const QUALITY_ORDER = ['highres', 'hd2880', 'hd2160', 'hd1440', 'hd1080', 'hd720', 'large', 'medium', 'small'];
+                    const bestLevel = QUALITY_ORDER.find(q => levels.includes(q)) || levels[0];
+                    const currentQuality = typeof player.getPlaybackQuality === 'function' ? player.getPlaybackQuality() : null;
+
+                    const minTargetHeight = QUALITY_HEIGHT_LOOKUP[bestLevel] || 1000;
+
+                    if (currentQuality === bestLevel || v.videoHeight >= minTargetHeight || (bestLevel === 'hd1080' && v.videoHeight >= 1000)) {
+                        isMax = true;
+                    }
+                } else if (v.videoHeight >= 1080) {
+                    isMax = true;
+                }
+            }
+
+            if (isMax) {
+                btnEl?.classList.add('vultra-max-quality');
+                panelEl?.classList.add('vultra-max-quality');
+            } else {
+                btnEl?.classList.remove('vultra-max-quality');
+                panelEl?.classList.remove('vultra-max-quality');
+            }
+        }
+
+        // =========================================================================
+        // SEAMLESS MAX QUALITY ENFORCEMENT ENGINE (4K / 2K / 1080p Enhanced)
+        // =========================================================================
+
+        function applyInitialPlayerQuality() {
+            const player = document.getElementById('movie_player') || document.querySelector('.html5-video-player');
+            if (!player || typeof player.getAvailableQualityLevels !== 'function') return false;
+
+            const levels = player.getAvailableQualityLevels();
+            if (!levels || !levels.length) return false;
+
+            const QUALITY_ORDER = ['highres', 'hd2880', 'hd2160', 'hd1440', 'hd1080', 'hd720'];
+            const best = QUALITY_ORDER.find(q => levels.includes(q)) || levels[0];
+
+            const current = typeof player.getPlaybackQuality === 'function' ? player.getPlaybackQuality() : null;
+            if (current !== best) {
+                try {
+                    player.setPlaybackQualityRange?.(best, best);
+                    player.setPlaybackQuality?.(best);
+                    console.log(`[V-Ultra v7.2] Initial quality locked to ${best}`);
+                } catch (_) {}
+            }
+            return best;
+        }
+
+        async function enforceHighestQualityViaMenu() {
+            const newUrlParams = new URLSearchParams(window.location.search);
+            const vid = newUrlParams.get('v') || window.location.pathname;
+            if (!vid || qualityAttemptedForVideo === vid) return;
+
+            const player = document.getElementById('movie_player');
+            const v = document.querySelector('video.html5-main-video');
+            if (!player || !v) return;
+
+            if (v.videoHeight >= 1440) {
+                qualityAttemptedForVideo = vid;
+                updateMaxQualityIndicator();
+                return;
+            }
+
+            const settingsButton = document.querySelector('.ytp-settings-button');
+            if (!settingsButton) return;
+
+            qualityAttemptedForVideo = vid;
+
+            // Stealthily hide settings menu during programmatic selection
+            document.documentElement.classList.add('vultra-hide-settings');
+
+            const closeMenu = () => {
+                document.documentElement.classList.remove('vultra-hide-settings');
+                const menu = document.querySelector('.ytp-settings-menu');
+                if (menu && getComputedStyle(menu).display !== 'none') {
+                    settingsButton.click();
+                }
+                updateMaxQualityIndicator();
+            };
+
+            try {
+                settingsButton.click();
+                await new Promise(r => setTimeout(r, 60));
+
+                const menu = document.querySelector('.ytp-settings-menu');
+                if (!menu) {
+                    closeMenu();
+                    return;
+                }
+
+                const items = Array.from(menu.querySelectorAll('.ytp-menuitem'));
+                const qualityItem = items.find(item => {
+                    const txt = (item.textContent || '').toLowerCase();
+                    return txt.includes('quality') || txt.includes('qualité') || txt.includes('qualität') ||
+                           txt.includes('calidad') || txt.includes('laatu') || txt.includes('品質') ||
+                           txt.includes('画质') || txt.includes('kualitas');
+                });
+
+                if (!qualityItem) {
+                    closeMenu();
+                    return;
+                }
+
+                const labelText = qualityItem.textContent || '';
+                if (labelText.includes('2160') || labelText.includes('1440') || labelText.includes('4K')) {
+                    closeMenu();
+                    return;
+                }
+
+                qualityItem.click();
+                await new Promise(r => setTimeout(r, 60));
+
+                // Option 0 is ALWAYS the top resolution available on this video
+                const qualityOptions = Array.from(menu.querySelectorAll('.ytp-menuitem'));
+                if (qualityOptions.length > 0) {
+                    const topOption = qualityOptions[0];
+                    const isChecked = topOption.getAttribute('aria-checked') === 'true' ||
+                                      topOption.classList.contains('ytp-menuitem-checked');
+                    if (!isChecked) {
+                        const optText = topOption.textContent.replace(/\s+/g, ' ').trim();
+                        console.log(`[V-Ultra v7.2] Upgrading stream to top option: ${optText}`);
+                        logStatus('SETTING: ' + optText);
+                        topOption.click();
+                    }
+                }
+            } catch (e) {
+                console.warn('[V-Ultra] Error in menu quality selection:', e);
+            } finally {
+                closeMenu();
+            }
+        }
+
+        const btn = createEl('button', { id: 'vector-btn', textContent: 'V-ULTRA', className: 'vector-ui-element' });
+        const hud = createEl('div', { id: 'zoom-hud' });
+        const panel = createEl('div', { id: 'vector-panel', className: 'vector-ui-element' });
+        const sensor = createEl('div', { id: 'vector-sensor' });
+        sensor.onmouseenter = () => document.body.classList.add('vector-hover');
+
+        const setupUI = () => {
+            if (document.getElementById('vector-panel')) return;
+            if (!document.body) return;
+            document.body.append(btn, hud, panel, sensor);
+
+            const drag = createEl('div', { className: 'drag-handle', textContent: 'VECTOR-ULTRA COMMAND' });
+            panel.appendChild(drag);
+
+            let isD = false, ox, oy;
+            drag.onmousedown = (e) => {
+                isD = true;
+                const r = panel.getBoundingClientRect();
+                ox = e.clientX - r.left;
+                oy = e.clientY - r.top;
+            };
+            document.onmousemove = (e) => {
+                if (isD) {
+                    panel.style.left = (e.clientX - ox) + 'px';
+                    panel.style.top = (e.clientY - oy) + 'px';
+                    panel.style.right = 'auto';
+                }
+            };
+            document.onmouseup = () => isD = false;
+
+            const createTog = (id, label, checked, fn) => {
+                const w = createEl('div', { className: 'toggle-wrap' });
+                const c = createEl('input', { type: 'checkbox', id, checked });
+                c.onchange = (e) => fn(e.target.checked);
+                w.append(c, createEl('label', {
+                    textContent: label,
+                    htmlFor: id,
+                    style: 'font-size:10px; font-weight:bold; cursor:pointer'
+                }));
+                panel.appendChild(w);
+            };
+
+            createTog('l-chk', 'LOCK SETTINGS (PERSISTENT)', lockSettings, (v) => {
+                lockSettings = v;
+                GM_setValue('vector_lockState', v);
+                logStatus(v ? "Vector Locked" : "Auto-Load Active");
+            });
+
+            createTog('sf-chk', 'SMART FIT (AUTO-ZOOM)', smartFitActive, (v) => {
+                smartFitActive = v;
+                GM_setValue('vector_smartFitState', v);
+                if (v) performSmartFit();
+            });
+
+            panel.appendChild(createEl('b', { textContent: 'VECTOR PRESETS', className: 'label-text' }));
+            const pSel = createEl('select');
+            const updateP = () => {
+                pSel.replaceChildren(createEl('option', { value: '', textContent: '-- LOAD PRESET --' }));
+                Object.keys(db.presets).forEach(n => pSel.appendChild(createEl('option', { value: n, textContent: n })));
+            };
+            updateP();
+            panel.appendChild(pSel);
+
+            pSel.onchange = () => {
+                if (db.presets[pSel.value]) {
+                    settings = { ...db.presets[pSel.value] };
+                    updateCSS();
+                    syncSliders();
+                    logStatus("VECTOR LOADED: " + pSel.value);
+                }
+            };
+
+            const pRow = createEl('div', { className: 'ui-row' });
+            const pSav = createEl('button', { className: 'ui-btn', textContent: 'SAVE NEW' });
+            const pDel = createEl('button', { className: 'ui-btn ui-btn-red', textContent: 'DELETE' });
+            pRow.append(pSav, pDel);
+            panel.appendChild(pRow);
+
+            const pLnk = createEl('button', {
+                className: 'ui-btn ui-btn-blue',
+                textContent: 'LINK TO CHANNEL',
+                style: 'width:100%; margin-bottom:10px'
+            });
+            panel.appendChild(pLnk);
+
+            const addS = (label, key, min, max, step, isShorts = false) => {
+                panel.appendChild(createEl('span', { textContent: label, className: 'label-text' }));
+                const s = createEl('input', {
+                    type: 'range',
+                    min, max, step,
+                    value: settings[key],
+                    id: 'slider-' + key
+                });
+                s.oninput = (e) => {
+                    settings[key] = parseFloat(e.target.value);
+                    if (!isShorts && key === 'zoom') {
+                        smartFitActive = false;
+                        const sf = document.getElementById('sf-chk');
+                        if (sf) sf.checked = false;
+                    }
+                    if (isShorts && smartFitActive) performSmartFit();
+                    updateCSS();
+                };
+                panel.appendChild(s);
+            };
+
+            addS('SHORTS FOCUS ZOOM', 'shortsZoom', 1, 2.5, 0.01, true);
+            addS('LANDSCAPE ZOOM', 'zoom', 1, 3, 0.01);
+            addS('VERTICAL SHIFT', 'y', -400, 400, 1);
+
+            panel.appendChild(createEl('b', {
+                textContent: 'FILTERS (HARDWARE ACCELERATED)',
+                className: 'label-text',
+                style: 'margin-top: 10px;'
+            }));
+
+            addS('BRIGHTNESS', 'bright', 50, 150, 1);
+            addS('CONTRAST', 'cont', 50, 150, 1);
+            addS('SATURATION', 'sat', 0, 200, 1);
+
+            panel.appendChild(createEl('div', {
+                id: 'vector-status',
+                textContent: '> VECTOR READY',
+                className: 'status-console'
+            }));
+
+            btn.onclick = () => {
+                panel.style.display = panel.style.display === 'none' ? 'block' : 'none';
+            };
+
+            pSav.onclick = () => {
+                const n = prompt("VECTOR NAME:");
+                if (n) {
+                    db.presets[n] = { ...settings };
+                    saveDB();
+                    updateP();
+                    pSel.value = n;
+                    logStatus("SAVED: " + n);
+                }
+            };
+
+            pDel.onclick = () => {
+                if (pSel.value) {
+                    delete db.presets[pSel.value];
+                    saveDB();
+                    updateP();
+                    logStatus("VECTOR DELETED");
+                }
+            };
+
+            pLnk.onclick = () => {
+                const chan = document.querySelector('ytd-video-owner-renderer #channel-name a')?.textContent.trim();
+                if (chan && pSel.value) {
+                    db.channels[chan] = pSel.value;
+                    saveDB();
+                    logStatus("LINKED VECTOR TO " + chan);
+                }
+            };
+
+            document.addEventListener('mousemove', resetIdleTimer);
+        };
+
+        const syncSliders = () => {
+            ['zoom', 'y', 'shortsZoom', 'bright', 'cont', 'sat'].forEach(k => {
+                const el = document.getElementById('slider-' + k);
+                if (el) el.value = settings[k];
+            });
+        };
+
+        const resObs = new ResizeObserver(() => {
+            scheduleSmartFit();
+            updateMaxQualityIndicator();
+        });
+
+        const handleVideoChange = () => {
+            const v = document.querySelector('video.html5-main-video');
+            const p = document.querySelector('#movie_player');
+
+            applyInitialPlayerQuality();
+
+            if (v && v.src !== lastVideoSrc) {
+                lastVideoSrc = v.src;
+                video = v;
+                v.addEventListener('loadedmetadata', () => {
+                    scheduleSmartFit();
+                    applyInitialPlayerQuality();
+                    setTimeout(enforceHighestQualityViaMenu, 350);
+                    setTimeout(updateMaxQualityIndicator, 600);
+                }, { once: true });
+                if (p) resObs.observe(p);
+
+                if (!lockSettings) {
+                    const chan = document.querySelector('ytd-video-owner-renderer #channel-name a')?.textContent.trim();
+                    const preset = db.channels[chan];
+                    if (preset && db.presets[preset]) {
+                        settings = { ...db.presets[preset] };
+                        logStatus("VECTOR AUTO: " + preset);
+                    } else {
+                        settings = {
+                            zoom: 1, x: 0, y: 0,
+                            bright: 100, cont: 100, sat: 100, sharpen: 0,
+                            shortsZoom: settings.shortsZoom
+                        };
+                    }
+                }
+                scheduleSmartFit();
+                updateCSS();
+                syncSliders();
+                setTimeout(enforceHighestQualityViaMenu, 450);
+                setTimeout(updateMaxQualityIndicator, 800);
+            }
+        };
+
+        window.addEventListener('yt-navigate-start', () => {
+            qualityAttemptedForVideo = '';
+            const btnEl = document.getElementById('vector-btn');
+            const panelEl = document.getElementById('vector-panel');
+            btnEl?.classList.remove('vultra-max-quality');
+            panelEl?.classList.remove('vultra-max-quality');
+        });
+
+        window.addEventListener('yt-navigate-finish', () => {
+            preSeedStoredQuality();
+            setTimeout(handleVideoChange, 100);
+        });
+
+        setInterval(() => {
+            setupUI();
+            handleVideoChange();
+            updateMaxQualityIndicator();
+
+            const mast = document.getElementById('masthead-container');
+            if (mast && !mast.hasVector) {
+                mast.hasVector = true;
+                mast.onmouseenter = () => document.body.classList.add('vector-hover');
+                mast.onmouseleave = () => document.body.classList.remove('vector-hover');
+            }
+
+            const shouldPlay = (video && !video.paused && (Date.now() - scriptInitTime > 3000));
+            if (shouldPlay !== isPlayingState) {
+                isPlayingState = shouldPlay;
+                if (shouldPlay) {
+                    document.body.setAttribute('vector-playing', 'true');
+                } else {
+                    document.body.removeAttribute('vector-playing');
+                    document.body.classList.remove('vector-hover');
+                }
+            }
+        }, 1000);
+    }
+
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', initVUltraUI);
+    } else {
+        initVUltraUI();
+    }
+})();
