@@ -2,7 +2,7 @@
 
 A Tampermonkey userscript that reshapes the YouTube player for distraction-free, black-bar-free viewing. Built for Brave/Chromium (should work in other Chromium browsers). Fully automatic once set up.
 
-IGNORE THE REST JUST COPY PASTE THE RAINBOW FILE CONTENS INTO A NEW SCRIPT IN TAMPER MONKEY, or violent monkey, if you prefer. Should work in both and on all chromium browsers, but I only tested this on Windows with Brave browser. Thanks!
+IGNORE THE REST JUST COPY PASTE THE RAINBOW FILE CONTENTS INTO A NEW SCRIPT IN TAMPER MONKEY, or Violent Monkey, if you prefer. Should work in both and on all chromium browsers, but I only tested this on Windows with Brave browser. Thanks!
 
 > ⚠️ Some features are partial/experimental (noted below). The core **Smart Fit** is the main reason to use it and works well.
 
