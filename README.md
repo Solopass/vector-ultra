@@ -2,7 +2,9 @@
 
 A Tampermonkey userscript that reshapes the YouTube player for distraction-free, black-bar-free viewing. Built for Brave/Chromium (should work in other Chromium browsers). Fully automatic once set up.
 
-IGNORE THE REST JUST COPY PASTE THE RAINBOW FILE CONTENTS INTO A NEW SCRIPT IN TAMPER MONKEY, or Violent Monkey, if you prefer. Should work in both and on all chromium browsers, but I only tested this on Windows with Brave browser. Thanks!
+IGNORE THE FEATURES TABLE IT'S OUTDATED --- JUST COPY PASTE THE RAINBOW FILE CONTENTS INTO A NEW SCRIPT IN TAMPER MONKEY.
+I only tested this on Windows with Brave browser. Thanks! 
+Check notes section and install section if you're confused on what to do next.
 
 > ⚠️ Some features are partial/experimental (noted below). The core **Smart Fit** is the main reason to use it and works well.
 
@@ -18,7 +20,7 @@ IGNORE THE REST JUST COPY PASTE THE RAINBOW FILE CONTENTS INTO A NEW SCRIPT IN T
 
 ## Install
 
-1. Install the **[Tampermonkey](https://www.tampermonkey.net/)** extension (Chrome, Brave, Firefox, or Edge).
+1. Install the **[Tampermonkey](https://www.tampermonkey.net/)** extension (Chrome, Brave, Firefox, or Edge). Or Violent Monkey.
 2. Open the Tampermonkey dashboard → **Create a new script**, clear the template, and paste the contents of [`vector-ultra.user.js`](./vector-ultra.user.js). Save.
    - (Or, once this repo is public, install directly from the raw URL of `vector-ultra.user.js`.)
 3. Open any YouTube video. The UI adjusts automatically and a floating **V-ULTRA** button appears in the top-right.
